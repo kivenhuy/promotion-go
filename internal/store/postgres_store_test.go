@@ -42,6 +42,7 @@ func TestMain(m *testing.M) {
 	if testDB != nil {
 		testDB.Close()
 	}
+
 	os.Exit(code)
 }
 
@@ -50,6 +51,9 @@ func TestMain(m *testing.M) {
 func requireDB(t *testing.T) *sql.DB {
 	t.Helper()
 	if testDB == nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("running on CI but Postgres is unreachable")
+		}
 		t.Skip("không kết nối được Postgres — bỏ qua integration test")
 	}
 	return testDB
