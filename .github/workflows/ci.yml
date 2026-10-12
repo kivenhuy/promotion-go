@@ -24,16 +24,15 @@ jobs:
     steps:
       # 1. checkout code
       - uses: 
-          actions/checkout@v4
-
+          actions/checkout@v5
        # 2. setup Go đúng version trong go.mod
       - uses: 
-          actions/setup-go@v5
+          actions/setup-go@v6
         with: 
           go-version-file: go.mod
       # 3. cài goose, chạy migrations
       - run: |
-            go install github.com/pressly/goose/v3/cmd/goose@latest
+            go install github.com/pressly/goose/v3/cmd/goose@v3.28.0
             goose -dir migrations postgres "$TEST_DATABASE_URL" up
 
       # 4. go vet ./...

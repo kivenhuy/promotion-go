@@ -1,4 +1,6 @@
 # promotion-go
+![CI](https://github.com/kivenhuy/promotion-go/actions/workflows/ci.yml/badge.svg)
+
 
 A backend service for running limited-stock promotion campaigns in games and web apps.
 
