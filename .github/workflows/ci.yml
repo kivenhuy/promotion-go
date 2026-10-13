@@ -40,3 +40,8 @@ jobs:
       # 5. go test -race -count=5 ./...
       - run: go test -race -count=5 ./...
       - run: docker build -t promotion-go .
+      - run: |
+          docker run -d --name app -p 8080:8080 -e DATABASE_URL="$TEST_DATABASE_URL" promotion-go
+          sleep 3
+          docker logs app
+          curl -f localhost:8080/healthz
