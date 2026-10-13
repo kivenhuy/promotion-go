@@ -45,8 +45,14 @@ func main() {
 
 	defer stop()
 
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+
+	}
+	addr := ":" + port
 	srv := &http.Server{
-		Addr:              ":8080",
+		Addr:              addr,
 		Handler:           h.Routes(),
 		ReadHeaderTimeout: 3 * time.Second,
 		ReadTimeout:       5 * time.Second,
@@ -55,7 +61,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("server starting", "addr", ":8080") // tách ra field
+		logger.Info("server starting", "addr", addr) // tách ra field
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server lỗi: %v", err)
 		}
