@@ -198,7 +198,7 @@ curl -X POST localhost:8080/draws \
 
 ## Known limits
 
-Not yet measured under load. The numbers below are reasoning, not benchmarks — see the roadmap.
+Not yet measured under load. The numbers below are reasoning, not benchmarks.
 
 **The expected bottleneck is row-lock contention, not the connection pool.** Every request for a popular prize updates the same `gift_package` row, and Postgres serializes those updates. Adding application instances does not help: ten servers writing to one row still queue behind the same lock.
 
@@ -213,12 +213,3 @@ Mitigations, cheapest first:
 5. pre-allocated prize pool with `SKIP LOCKED` — removes contention entirely, at the cost of fixing the prize distribution up front
 
 Most systems never need past step 2. Steps 4 and 5 require changing the data model, not the queries — no SQL syntax makes a thousand writes to one row go faster.
-
-## Roadmap
-
-- [ ] Return 403 instead of 409 when an idempotency key belongs to another user, and add a machine-readable `code` field to error responses so clients can distinguish the three 409 cases
-- [ ] Load test, record p99 and the actual throughput ceiling
-- [ ] Prometheus metrics, pprof endpoint
-- [ ] Redis as a first-line duplicate filter in front of the unique constraint
-- [ ] Docker Compose + CI running `go test -race`
-- [ ] Async reward delivery through a queue — the draw must be synchronous, delivery does not
