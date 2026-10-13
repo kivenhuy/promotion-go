@@ -4,6 +4,9 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     env: 
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/luckydraw?sslmode=disable
     services:
@@ -45,3 +48,14 @@ jobs:
           sleep 3
           docker logs app
           curl -f localhost:8080/healthz
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: github.ref == 'refs/heads/main'
+        run: |
+          docker tag promotion-go ghcr.io/${{ github.repository }}:${{ github.sha }}
+          docker tag promotion-go ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${{ github.repository }}:${{ github.sha }}
+          docker push ghcr.io/${{ github.repository }}:latest
