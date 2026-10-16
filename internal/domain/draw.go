@@ -14,6 +14,7 @@ type DrawResult struct {
 var ErrNoPrizeAvailable = errors.New("no prize available")
 var ErrQuotaExceeded = errors.New("You don`t have any turn")
 var ErrKeyConflict = errors.New("Key không trùng khớp")
+var ErrInProgress = errors.New("request in progress")
 
 func Draw(prizes []*Prize) (*Prize, error) {
 	// Vòng 1: tính tổng trọng số của các giải CÒN HÀNG.

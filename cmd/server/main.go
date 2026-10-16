@@ -6,6 +6,7 @@ import (
 	"log"
 	"log/slog"
 	"luckydraw/internal/api"
+	"luckydraw/internal/idem"
 	"luckydraw/internal/store"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -39,8 +41,19 @@ func main() {
 		log.Fatalf("không kết nối được DB: %v", err)
 
 	}
+
+	/// Mở cấu hình redis
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	defer rdb.Close()
+
 	st := store.NewPostgresStore(db)
-	h := api.NewHandler(st, logger)
+
+	g := idem.New(st, rdb, logger)
+	h := api.NewHandler(g, logger)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 
 	defer stop()

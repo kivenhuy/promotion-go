@@ -54,6 +54,10 @@ func (h *Handler) Draw(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
 			return
 		}
+		if errors.Is(err, domain.ErrInProgress) {
+			writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
+			return
+		}
 		if errors.Is(err, domain.ErrKeyConflict) {
 			writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
 			return
