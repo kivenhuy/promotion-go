@@ -1,6 +1,6 @@
 # promotion-go
-![CI](https://github.com/kivenhuy/promotion-go/actions/workflows/ci.yml/badge.svg)
 
+![CI](https://github.com/kivenhuy/promotion-go/actions/workflows/ci.yml/badge.svg)
 
 A backend service for running limited-stock promotion campaigns in games and web apps.
 
@@ -26,6 +26,8 @@ POST /draws
 200 OK        {"prize_id": 3, "name": "Sticker"}    replay of a previous request
 409 Conflict  {"error": "no prize available"}       out of stock, user limit reached,
                                                     or key belongs to another user
+409 Conflict  {"error": "request in progress"}      same key is being processed right now;
+                                                    retry after a short delay
 400 Bad Req   {"error": "..."}                      malformed body
 500            {"error": "lỗi hệ thống"}            internal error, details only in server logs
 
@@ -39,10 +41,11 @@ cmd/server        composition root: config, DB pool, signal handling, graceful s
 internal/api      HTTP: routing, middleware, DTOs, status-code mapping
 internal/domain   business rules: weighted draw, prize invariants, sentinel errors
 internal/store    persistence: Postgres queries, transactions
+internal/idem     Redis guard in front of the store: dedup, replay, fail-open
 migrations        goose migrations
 ```
 
-Dependencies point inward. `api` declares the interface it needs; `store` satisfies it implicitly. `domain` imports nothing from the other two, so the draw algorithm is unit-testable without a database.
+Dependencies point inward. `api` declares the interface it needs; `store` satisfies it implicitly, and `idem` wraps `store` behind the same interface, so the handler cannot tell whether Redis is in the chain. `domain` imports nothing from the other two, so the draw algorithm is unit-testable without a database.
 
 ---
 
@@ -127,6 +130,18 @@ This is not decoration. Mutation testing (below) confirmed it: with the `WHERE` 
 
 Keys live in `idempotency_record`, not as a column on `draw_log`, because the two have different lifetimes: audit logs are kept indefinitely, keys expire after ~48h and are swept by a cleanup job. Keeping them together would mean a unique index over the entire log history, and would break once `draw_log` needs partitioning — unique constraints do not hold across partitions.
 
+### Redis as a first-line filter, not a source of truth
+
+A Redis guard sits in front of the Postgres store. The first request for an `Idempotency-Key` runs `SET key "processing" NX EX 10`; after the transaction commits, the result is written back under the same key with a 48-hour TTL. Retries are then answered from Redis without opening a transaction, and a retry storm from a misbehaving client never reaches the connection pool.
+
+Redis does not replace the unique index. `SET NX` returns immediately instead of blocking, nothing is rolled back when the transaction fails (the guard deletes the key by hand), and keys expire. Correctness is still enforced only in the database; Redis makes the common path cheaper.
+
+Two consequences follow.
+
+**Fail-open needs a timeout.** Every Redis call is capped at 50 ms; on error or timeout the request goes straight to Postgres. The fail-open test asserts total latency under 500 ms with Redis unreachable. Before the per-call timeout existed, that test measured 3.5 s for two requests: go-redis retried the dial five times, so a dead Redis would have slowed every request by ~1.7 s without failing a single one.
+
+**Short TTLs are safe because the database is the backstop.** If the `processing` key expires while the first transaction is still running, the retry falls through to Postgres, blocks on the unique index, and is replayed correctly. A long TTL buys nothing here and costs a lockout: after a crash, retries would be rejected as "in progress" until the key expired.
+
 ---
 
 ## Schema
@@ -150,9 +165,9 @@ go test -race -count=5 ./...
 
 `-count=5` is deliberate. Concurrency tests are not deterministic — a race only surfaces when timing is unfavourable, and a single green run proves very little.
 
-Integration tests run against a real Postgres and skip cleanly when none is reachable, so `go test ./...` stays green on a machine without a database. Each test seeds its own campaign named after `t.Name()`, so tests never collide and can run in parallel.
+Integration tests run against a real Postgres and a real Redis. They skip cleanly when neither is reachable, so `go test ./...` stays green on a machine without them, and they **fail** instead of skipping when `CI=true`, so a broken CI setup can never produce a green run with no tests executed. Each test seeds its own campaign or key named after `t.Name()`, so tests never collide and can run in parallel.
 
-Three tests cover the hard parts:
+Three store tests cover the hard parts of the transaction:
 
 | Test | Asserts |
 |---|---|
@@ -162,6 +177,16 @@ Three tests cover the hard parts:
 
 Each test asserts both the returned value **and** the persisted state. A function returning `nil` only means it ran without error; it does not mean the data landed where it should. A forgotten `tx.Commit()` passes the first check and fails the second.
 
+Five guard tests replace the store with a counting fake, because the guard's only job is deciding whether to call it:
+
+| Test | Asserts |
+|---|---|
+| same key twice | store called **once**, second result is a replay |
+| Redis unreachable | store called twice, no error surfaces, both calls finish in **under 500 ms** |
+| store returns an error | key is deleted, so the retry is not rejected as "in progress" |
+| another user reuses the key | rejected from Redis, store not called |
+| 10 goroutines, same key | store called exactly once; the other nine are either replays or "in progress", in a ratio that varies per run |
+
 ### Mutation testing
 
 The tests were validated by deliberately breaking the code and confirming they go red:
@@ -170,21 +195,34 @@ The tests were validated by deliberately breaking the code and confirming they g
 |---|---|
 | remove `tx`, use the pool directly for the quota upsert | caught — `user_quota` left 10 rows instead of 1 |
 | remove `WHERE win_quantity < total_quantity` | caught in 7/8 runs — the CHECK constraint fires instead, surfacing as an unexpected SQLSTATE rather than a clean 409 |
+| guard: skip writing the result back to Redis | caught — the key stays `processing`, so the retry is rejected instead of replayed |
+| guard: reuse one cancelled context for all Redis calls | caught — every call after the first fails with `context canceled`, the store is called twice |
+| guard: no per-call timeout | caught by the 500 ms assertion — 3.5 s for two requests with Redis down |
 
-The second one is why the concurrency test distinguishes *expected* errors from *any* error. Counting failures alone would have passed.
+The second one is why the concurrency test distinguishes *expected* errors from *any* error. Counting failures alone would have passed. The last two were not deliberate mutations: they were real bugs the tests caught during development, and the reason the fail-open test asserts on time.
 
 ---
 
 ## Running locally
 
 ```bash
-brew install postgresql@17 goose
+brew install postgresql@17 goose redis
+brew services start redis
 createdb luckydraw
 
 export DATABASE_URL="postgres://$USER@localhost:5432/luckydraw?sslmode=disable"
 goose -dir migrations postgres "$DATABASE_URL" up
 
-go run ./cmd/server
+go run ./cmd/server          # PORT and REDIS_ADDR are optional, defaults 8080 and localhost:6379
+```
+
+Redis is optional at runtime: without it the service logs a warning per request and runs fail-open against Postgres alone.
+
+Or run the published image, which CI builds, smoke-tests and pushes on every commit to `main`:
+
+```bash
+docker pull ghcr.io/kivenhuy/promotion-go:latest
+docker run -p 8080:8080 -e DATABASE_URL="postgres://..." ghcr.io/kivenhuy/promotion-go:latest
 ```
 
 ```bash
