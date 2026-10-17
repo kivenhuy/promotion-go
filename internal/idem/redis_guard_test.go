@@ -2,9 +2,11 @@ package idem
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"luckydraw/internal/domain"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -131,5 +133,121 @@ func TestGuard_RedisChet_FailOpen(t *testing.T) {
 	}
 	if fake.calls.Load() != 2 {
 		t.Errorf("next bị gọi %d lần; want 2", fake.calls.Load())
+	}
+}
+
+func TestGuard_NextLoi_XoaKey(t *testing.T) {
+	rdb := requireRedis(t)
+	fake := &fakeNext{err: domain.ErrNoPrizeAvailable}
+	g := New(fake, rdb, slog.Default())
+	ctx := context.Background()
+	const userID int64 = 1
+	key := t.Name()
+	t.Cleanup(func() { rdb.Del(context.Background(), "idem:"+key) })
+	lan1, err := g.DrawAndTake(ctx, userID, "tet-2026", key)
+
+	if !errors.Is(err, domain.ErrNoPrizeAvailable) {
+		t.Fatalf("lần 1: err = %v; want ErrNoPrizeAvailable", err)
+	}
+
+	if lan1.Replayed {
+		t.Error("lần 1: Replayed = true; want false")
+	}
+
+	lan2, err := g.DrawAndTake(ctx, userID, "tet-2026", key)
+	if !errors.Is(err, domain.ErrNoPrizeAvailable) {
+		t.Fatalf("lần 1: err = %v; want ErrNoPrizeAvailable", err)
+	}
+
+	if lan2.Replayed {
+		t.Error("lần 2: Replayed = true; want false")
+	}
+	if fake.calls.Load() != 2 {
+		t.Errorf("next bị gọi %d lần; want 2", fake.calls.Load())
+	}
+	if rdb.Exists(ctx, "idem:"+key).Val() != 0 {
+		t.Error("Key exist; want key del")
+	}
+}
+
+func TestGuard_KeyCuaNguoiKhac(t *testing.T) {
+	rdb := requireRedis(t)
+	fake := &fakeNext{res: domain.DrawResult{Prize: &domain.Prize{ID: 3, Name: "Sticker"}}}
+	g := New(fake, rdb, slog.Default())
+	ctx := context.Background()
+	const userID int64 = 1
+	const userID2 int64 = 3
+	key := t.Name()
+	t.Cleanup(func() { rdb.Del(context.Background(), "idem:"+key) })
+	lan1, err := g.DrawAndTake(ctx, userID, "tet-2026", key)
+
+	if err != nil {
+		t.Fatalf("lần 1: %v", err)
+	}
+	if lan1.Prize == nil {
+		t.Fatal("lần 1: Prize = nil; want một giải")
+	}
+
+	if lan1.Replayed {
+		t.Error("lần 1: Replayed = true; want false")
+	}
+
+	lan2, err := g.DrawAndTake(ctx, userID2, "tet-2026", key)
+	if !errors.Is(err, domain.ErrKeyConflict) {
+		t.Fatalf("lần 2: err = %v; want ErrKeyConflict", err)
+	}
+
+	if lan2.Replayed {
+		t.Error("lần 2: Replayed = true ; want false")
+	}
+	if fake.calls.Load() != 1 {
+		t.Errorf("next bị gọi %d lần; want 1", fake.calls.Load())
+	}
+}
+
+func TestGuard_NhieuGoroutineCungKey(t *testing.T) {
+	rdb := requireRedis(t)
+	fake := &fakeNext{res: domain.DrawResult{Prize: &domain.Prize{ID: 3, Name: "Sticker"}}}
+	g := New(fake, rdb, slog.Default())
+	ctx := context.Background()
+	const userID int64 = 1
+	key := t.Name()
+	t.Cleanup(func() { rdb.Del(context.Background(), "idem:"+key) })
+	const rounds = 10
+	var wg sync.WaitGroup
+	var moi atomic.Int64
+	var replay atomic.Int64
+	var dangXuLy atomic.Int64
+	start := make(chan struct{})
+	for range rounds {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			res, err := g.DrawAndTake(ctx, userID, "tet-2026", key)
+			switch {
+			case err == nil && !res.Replayed:
+				moi.Add(1)
+			case err == nil && res.Replayed:
+				replay.Add(1)
+			case errors.Is(err, domain.ErrInProgress):
+				dangXuLy.Add(1)
+			default:
+				t.Errorf("lỗi không mong đợi: %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if n := moi.Load(); n != 1 {
+		t.Errorf("phát ra %d giải; want 1", n)
+	}
+
+	if r, p := replay.Load(), dangXuLy.Load(); r+p != rounds-1 {
+		t.Errorf("replay + in_progress = %d + %d = %d; want %d", r, p, r+p, rounds-1)
+	}
+
+	if fake.calls.Load() != 1 {
+		t.Errorf("replay = %d; want 1", fake.calls.Load())
 	}
 }

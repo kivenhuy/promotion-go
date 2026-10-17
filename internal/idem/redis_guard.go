@@ -34,7 +34,7 @@ func New(next Drawer, rdb *redis.Client, lg *slog.Logger) *Guard {
 }
 
 func (g *Guard) setNX(ctx context.Context, key, val string, ttl time.Duration) (bool, error) {
-	rc, cancel := context.WithTimeout(ctx,redisTimeout)
+	rc, cancel := context.WithTimeout(ctx, redisTimeout)
 	defer cancel()
 	return g.rdb.SetNX(rc, key, val, ttl).Result()
 }
