@@ -31,8 +31,10 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/luckydraw?sslmode=disable
       REDIS_ADDR: redis:6379
+      DEBUG_ADDR: ":6060"
     ports:
       - "127.0.0.1:8090:8080"
+      - "127.0.0.1:6060:6060"
     depends_on:
       postgres:
         condition: service_healthy

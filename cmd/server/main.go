@@ -9,6 +9,7 @@ import (
 	"luckydraw/internal/idem"
 	"luckydraw/internal/store"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -40,6 +41,15 @@ func main() {
 	if err := db.PingContext(pingCtx); err != nil {
 		log.Fatalf("không kết nối được DB: %v", err)
 
+	}
+
+	if addr := os.Getenv("DEBUG_ADDR"); addr != "" {
+		go func() {
+			logger.Info("pprof listening", "addr", addr)
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				logger.Error("pprof server", "err", err)
+			}
+		}()
 	}
 
 	/// Mở cấu hình redis
