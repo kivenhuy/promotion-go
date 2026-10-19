@@ -256,7 +256,11 @@ An open-loop test (`loadtest/ceiling.js`, `constant-arrival-rate`, k6 on the sam
 | 600 req/s | 314 ms | 915 ms | 1.29 s | barely |
 | 800 req/s | 1.22 s | 3.6 s | 5.1 s | no, 5,922 iterations dropped |
 
-So on this host the service is comfortable at 400 req/s and saturates around 500. The slowest request measured **inside the handler** was 10.7 s during the 1,200 req/s run: requests were queueing for a pool connection while 25 transactions shared two cores with Postgres and the load generator. Pool exhaustion showed up as the symptom, exactly as predicted below; the cause was CPU. Because k6 shares the box, these are lower bounds.
+So on this host the service is comfortable at 400 req/s and saturates around 500. The slowest request measured **inside the handler** was 10.7 s during the 1,200 req/s run: requests were queueing for a pool connection while 25 transactions shared two cores with Postgres and the load generator. Pool exhaustion showed up as the symptom, exactly as predicted below. Because k6 shares the box, these are lower bounds.
+
+With the load generator moved off the box (laptop over an SSH tunnel, which itself collapsed above ~400 req/s), the picture changed: at 400 req/s Postgres sat at 62% CPU and `pg_stat_activity` showed **10 backends waiting on `transactionid` and 3 on `tuple` locks**, with request latency spiking to 1.5 s while total CPU was still under 120% of 200%. That is the hot-row contention predicted below, surfacing before CPU runs out. The lock on `gift_package` is held from the `UPDATE` through `INSERT draw_log` to the commit fsync; shortening that window (insert the log row before the hot update, or relax `synchronous_commit` where the business allows) is the first lever, and the next experiment.
+
+A CPU profile taken under steady load put `encoding/json` and `slog` nowhere near the top: the application's own CPU is dominated by syscalls to Postgres and Redis. The earlier guess that JSON logging was the cost was wrong, which is the reason to profile instead of guess.
 
 During the run the app container used ~70% CPU, Postgres ~25%, Redis ~20%. At this rate row-lock contention on `gift_package` did not surface; the first optimization target is per-request work in the application (one JSON log line per request, two to three Redis round-trips), not the database.
 
