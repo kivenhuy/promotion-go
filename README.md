@@ -246,7 +246,17 @@ Measured on a 2 vCPU / 4 GB VPS running app, Postgres and Redis together via Com
 
 Across 94,286 successful draws the stock counters, `draw_log` and `idempotency_record` matched to the row, and the prize split was 28/72 against configured weights of 30/70.
 
-Two caveats. The minimum latency was 1.7 ms, so most of the p50 is queueing introduced by the measurement setup, not service time. And this is not the ceiling: throughput was bounded by the VU ramp, and an arrival-rate test to find the knee is still to do.
+One caveat: the minimum latency was 1.7 ms, so most of that p50 is queueing introduced by the measurement setup, not service time. The VU ramp is also a closed loop, so the server throttles the load generator when it slows down and the numbers flatter it.
+
+An open-loop test (`loadtest/ceiling.js`, `constant-arrival-rate`, k6 on the same host) finds the knee:
+
+| target rate | p50 | p95 | p99 | kept up? |
+|---|---|---|---|---|
+| 400 req/s | 2.3 ms | 17 ms | 306 ms | yes |
+| 600 req/s | 314 ms | 915 ms | 1.29 s | barely |
+| 800 req/s | 1.22 s | 3.6 s | 5.1 s | no, 5,922 iterations dropped |
+
+So on this host the service is comfortable at 400 req/s and saturates around 500. The slowest request measured **inside the handler** was 10.7 s during the 1,200 req/s run: requests were queueing for a pool connection while 25 transactions shared two cores with Postgres and the load generator. Pool exhaustion showed up as the symptom, exactly as predicted below; the cause was CPU. Because k6 shares the box, these are lower bounds.
 
 During the run the app container used ~70% CPU, Postgres ~25%, Redis ~20%. At this rate row-lock contention on `gift_package` did not surface; the first optimization target is per-request work in the application (one JSON log line per request, two to three Redis round-trips), not the database.
 
