@@ -236,9 +236,25 @@ curl -X POST localhost:8080/draws \
 
 ## Known limits
 
-Not yet measured under load. The numbers below are reasoning, not benchmarks.
+Measured on a 2 vCPU / 4 GB VPS running app, Postgres and Redis together via Compose (`compose.yml`), with k6 ramping to 100 VUs over 70 s (`loadtest/draw.js`) and prize stock large enough that every request takes the full transactional path:
 
-**The expected bottleneck is row-lock contention, not the connection pool.** Every request for a popular prize updates the same `gift_package` row, and Postgres serializes those updates. Adding application instances does not help: ten servers writing to one row still queue behind the same lock.
+| | from a laptop over an SSH tunnel | k6 on the same host |
+|---|---|---|
+| requests / s (avg over ramp) | 644 | 625 |
+| p50 / p95 / p99 | 48 ms / 180 ms / < 500 ms | 48 ms / 191 ms / 291 ms |
+| 5xx | 0 | 0 |
+
+Across 94,286 successful draws the stock counters, `draw_log` and `idempotency_record` matched to the row, and the prize split was 28/72 against configured weights of 30/70.
+
+Two caveats. The minimum latency was 1.7 ms, so most of the p50 is queueing introduced by the measurement setup, not service time. And this is not the ceiling: throughput was bounded by the VU ramp, and an arrival-rate test to find the knee is still to do.
+
+During the run the app container used ~70% CPU, Postgres ~25%, Redis ~20%. At this rate row-lock contention on `gift_package` did not surface; the first optimization target is per-request work in the application (one JSON log line per request, two to three Redis round-trips), not the database.
+
+```bash
+k6 run loadtest/draw.js                      # BASE defaults to http://localhost:8090
+```
+
+**Beyond that point, the expected bottleneck is row-lock contention, not the connection pool.** Every request for a popular prize updates the same `gift_package` row, and Postgres serializes those updates. Adding application instances does not help: ten servers writing to one row still queue behind the same lock.
 
 Pool exhaustion is the symptom that shows up first in monitoring, and raising `MaxOpenConns` makes it worse — more transactions competing for the same row means a longer lock queue.
 
