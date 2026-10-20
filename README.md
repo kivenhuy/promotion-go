@@ -98,11 +98,13 @@ Inside the transaction, statements run in a fixed order:
 ```
 1. INSERT idempotency_record    cheap, rejects duplicates early
 2. UPSERT user_quota            contended by one user only
-3. UPDATE gift_package          contended by EVERYONE — touched last, held shortest
-4. INSERT draw_log
+3. INSERT draw_log              append-only, nobody contends for it
+4. UPDATE gift_package          contended by EVERYONE — last, so its lock spans only this statement and the commit
 ```
 
-Two reasons. The hottest row is locked last and held for the least time. And a fixed order across the whole codebase is what prevents deadlocks — any future operation touching these tables must follow it.
+Two reasons. The hottest row is locked last and held for the least time: everything that can be written without contention is written before it, so once the row lock is taken the only thing left is the commit. And a fixed order across the whole codebase is what prevents deadlocks — any future operation touching these tables must follow it.
+
+The log row is written before the stock is known to be available. That is safe because it lives inside the transaction: if the conditional update affects zero rows the function returns an error, the deferred rollback discards the log row with everything else, and nothing outside the transaction ever saw it. Originally the log came after the update; under load `pg_stat_activity` showed transactions queueing on the `gift_package` row while the holder was still inserting its log row, which is why it moved.
 
 ### Per-user limits in one statement
 

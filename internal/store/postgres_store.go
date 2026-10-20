@@ -68,21 +68,20 @@ func (s *PostgresStore) DrawAndTake(ctx context.Context, userID int64, programID
 		return domain.DrawResult{}, fmt.Errorf("user %d: %w", userID, domain.ErrQuotaExceeded)
 	}
 
-	err = s.updateStock(ctx, tx, programID, prize.ID)
-	if err != nil {
-		return domain.DrawResult{}, fmt.Errorf("Update stock fail: %w", err)
-	}
-
+	// Ghi log TRƯỚC khi trừ kho: draw_log không ai tranh, còn gift_package là hot row.
+	// Đặt UPDATE gift_package cuối cùng để row lock chỉ kéo dài qua UPDATE + COMMIT.
+	// Nếu hết quà, updateStock trả lỗi và defer tx.Rollback() huỷ luôn dòng log này.
 	const l = `
 		INSERT INTO draw_log (user_id, program_id, package_id, status)
 		VALUES ($1,$2,$3,'success')
 	`
-	resLog, err := tx.ExecContext(ctx, l, userID, programID, prize.ID)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, l, userID, programID, prize.ID); err != nil {
 		return domain.DrawResult{}, fmt.Errorf("create new log fail: %w", err)
 	}
-	if _, err := resLog.RowsAffected(); err != nil {
-		return domain.DrawResult{}, fmt.Errorf("create new log fail: %w", err)
+
+	err = s.updateStock(ctx, tx, programID, prize.ID)
+	if err != nil {
+		return domain.DrawResult{}, fmt.Errorf("Update stock fail: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
