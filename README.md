@@ -252,15 +252,15 @@ One caveat: the minimum latency was 1.7 ms, so most of that p50 is queueing intr
 
 An open-loop test (`loadtest/ceiling.js`, `constant-arrival-rate`, k6 on the same host) finds the knee:
 
-| target rate | p50 | p95 | p99 | kept up? |
-|---|---|---|---|---|
-| 400 req/s | 2.3 ms | 17 ms | 306 ms | yes |
-| 600 req/s | 314 ms | 915 ms | 1.29 s | barely |
-| 800 req/s | 1.22 s | 3.6 s | 5.1 s | no, 5,922 iterations dropped |
+| target rate | before: p50 / p99 | after moving `INSERT draw_log` ahead of the hot update: p50 / p99 |
+|---|---|---|
+| 400 req/s | 2.3 ms / 306 ms | 2.3 ms / 454 ms |
+| 600 req/s | 314 ms / 1.29 s | **4.6 ms / 102 ms** |
+| 800 req/s | 1.22 s / 5.1 s, 5,922 dropped | 990 ms / 4.33 s, 3,407 dropped |
 
-So on this host the service is comfortable at 400 req/s and saturates around 500. The slowest request measured **inside the handler** was 10.7 s during the 1,200 req/s run: requests were queueing for a pool connection while 25 transactions shared two cores with Postgres and the load generator. Pool exhaustion showed up as the symptom, exactly as predicted below. Because k6 shares the box, these are lower bounds.
+Before the change the service was comfortable at 400 req/s and saturated around 500. Reordering one statement so that the `gift_package` row lock spans only the update and the commit (see *Lock ordering*) moved the knee past 600 req/s: at that rate p99 fell from 1.29 s to 102 ms and p50 from 314 ms to 4.6 ms, with no other change. 800 req/s is still over the knee, but with fewer dropped iterations. The slowest request measured **inside the handler** was 10.7 s during the 1,200 req/s run: requests were queueing for a pool connection while 25 transactions shared two cores with Postgres and the load generator. Pool exhaustion showed up as the symptom, exactly as predicted below. Because k6 shares the box, these are lower bounds.
 
-With the load generator moved off the box (laptop over an SSH tunnel, which itself collapsed above ~400 req/s), the picture changed: at 400 req/s Postgres sat at 62% CPU and `pg_stat_activity` showed **10 backends waiting on `transactionid` and 3 on `tuple` locks**, with request latency spiking to 1.5 s while total CPU was still under 120% of 200%. That is the hot-row contention predicted below, surfacing before CPU runs out. The lock on `gift_package` is held from the `UPDATE` through `INSERT draw_log` to the commit fsync; shortening that window (insert the log row before the hot update, or relax `synchronous_commit` where the business allows) is the first lever, and the next experiment.
+With the load generator moved off the box (laptop over an SSH tunnel, which itself collapsed above ~400 req/s), the picture changed: at 400 req/s Postgres sat at 62% CPU and `pg_stat_activity` showed **10 backends waiting on `transactionid` and 3 on `tuple` locks**, with request latency spiking to 1.5 s while total CPU was still under 120% of 200%. That is the hot-row contention predicted below, surfacing before CPU runs out. At that point the lock on `gift_package` was held from the `UPDATE` through `INSERT draw_log` to the commit fsync. Inserting the log row before the hot update is what produced the "after" column above. The remaining lever is the commit itself: relaxing `synchronous_commit` would shorten the lock further, at the cost of losing the last few milliseconds of commits on a crash, which a prize with real value cannot accept.
 
 A CPU profile taken under steady load put `encoding/json` and `slog` nowhere near the top: the application's own CPU is dominated by syscalls to Postgres and Redis. The earlier guess that JSON logging was the cost was wrong, which is the reason to profile instead of guess.
 
