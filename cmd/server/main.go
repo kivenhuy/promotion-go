@@ -12,6 +12,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -60,10 +61,20 @@ func main() {
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	defer rdb.Close()
 
+	maxInflight := 0
+	if v := os.Getenv("MAX_INFLIGHT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			log.Fatalf("MAX_INFLIGHT=%q không phải số: %v", v, err)
+		}
+		maxInflight = n
+	}
+
 	st := store.NewPostgresStore(db)
 
 	g := idem.New(st, rdb, logger)
 	h := api.NewHandler(g, logger)
+	h.MaxInflight = maxInflight
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 
 	defer stop()

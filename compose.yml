@@ -32,6 +32,7 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/luckydraw?sslmode=disable
       REDIS_ADDR: redis:6379
       DEBUG_ADDR: ":6060"
+      MAX_INFLIGHT: "50"
     ports:
       - "127.0.0.1:8090:8080"
       - "127.0.0.1:6060:6060"

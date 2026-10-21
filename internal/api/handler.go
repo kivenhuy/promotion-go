@@ -9,8 +9,9 @@ import (
 )
 
 type Handler struct {
-	store  PrizeDrawer
-	logger *slog.Logger
+	store       PrizeDrawer
+	logger      *slog.Logger
+	MaxInflight int
 }
 
 type PrizeDrawer interface {
@@ -23,9 +24,13 @@ func NewHandler(st PrizeDrawer, lg *slog.Logger) *Handler {
 
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /draws", h.Draw)
-	mux.HandleFunc("GET /healthz", h.Healthz)
 
+	max := h.MaxInflight
+	if max <= 0 {
+		max = 50
+	}
+	mux.Handle("POST /draws", limitInflight(max, http.HandlerFunc(h.Draw)))
+	mux.HandleFunc("GET /healthz", h.Healthz)
 	return h.logging(h.recoverMiddleware(mux))
 }
 
@@ -60,6 +65,11 @@ func (h *Handler) Draw(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, domain.ErrKeyConflict) {
 			writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
+			return
+		}
+		if errors.Is(err, context.Canceled) {
+			h.logger.Info("client canceled", "path", r.URL.Path)
+			w.WriteHeader(499)
 			return
 		}
 		// Lỗi hệ thống: log đầy đủ ở server, giấu chi tiết với client.

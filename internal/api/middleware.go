@@ -44,3 +44,21 @@ func (h *Handler) recoverMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+func limitInflight(max int, next http.Handler) http.Handler {
+	sem := make(chan struct{}, max)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case sem <- struct{}{}:
+			defer func() {
+				<-sem
+			}()
+			next.ServeHTTP(w, r)
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "busy, retry later"})
+
+		}
+
+	})
+}
