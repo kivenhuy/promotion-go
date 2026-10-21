@@ -144,6 +144,14 @@ Two consequences follow.
 
 **Short TTLs are safe because the database is the backstop.** If the `processing` key expires while the first transaction is still running, the retry falls through to Postgres, blocks on the unique index, and is replayed correctly. A long TTL buys nothing here and costs a lockout: after a crash, retries would be rejected as "in progress" until the key expired.
 
+### Shed load instead of queueing it
+
+Go starts a goroutine per connection and never says no, so under overload every request is accepted and then waits: for a pool connection, for a row lock, for the commit. Under a 1,200 req/s run the slowest request spent 10.7 s inside the handler before getting an answer it could have had in 2 ms.
+
+`/draws` now sits behind a concurrency limit implemented as a channel semaphore: at most `MAX_INFLIGHT` requests (default 50, twice the database pool) are inside the handler at once, and the next one gets a `503` with `Retry-After: 1` without waiting. `/healthz` is deliberately outside the limit, so a load balancer never mistakes an overloaded instance for a dead one and shifts its traffic onto the others.
+
+This is a concurrency limit, not a rate limit. It counts requests in progress, not requests per second, so it adapts on its own: when the database is fast, 50 slots carry thousands of requests per second; when it slows down, the slots fill and the limiter starts refusing at exactly the rate the system can no longer absorb. The test for it holds two fake requests inside the handler with a channel, checks that a third is refused in under 50 ms, releases the two, and checks that a fourth is admitted; removing the slot release makes only that last assertion fail.
+
 ---
 
 ## Schema
@@ -252,13 +260,13 @@ One caveat: the minimum latency was 1.7 ms, so most of that p50 is queueing intr
 
 An open-loop test (`loadtest/ceiling.js`, `constant-arrival-rate`, k6 on the same host) finds the knee:
 
-| target rate | before: p50 / p99 | after moving `INSERT draw_log` ahead of the hot update: p50 / p99 |
-|---|---|---|
-| 400 req/s | 2.3 ms / 306 ms | 2.3 ms / 454 ms |
-| 600 req/s | 314 ms / 1.29 s | **4.6 ms / 102 ms** |
-| 800 req/s | 1.22 s / 5.1 s, 5,922 dropped | 990 ms / 4.33 s, 3,407 dropped |
+| target rate | baseline: p50 / p99 | `INSERT draw_log` moved ahead of the hot update | + inflight limit of 50 (load shedding) |
+|---|---|---|---|
+| 400 req/s | 2.3 ms / 306 ms | 2.3 ms / 454 ms | 2.5 ms / 84 ms |
+| 600 req/s | 314 ms / 1.29 s | **4.6 ms / 102 ms** | 4.4 ms / 121 ms |
+| 800 req/s | 1.22 s / 5.1 s, 5,922 dropped | 990 ms / 4.33 s, 3,407 dropped | **63 ms / 211 ms**, 0 dropped, 11% of requests shed with 503 |
 
-Before the change the service was comfortable at 400 req/s and saturated around 500. Reordering one statement so that the `gift_package` row lock spans only the update and the commit (see *Lock ordering*) moved the knee past 600 req/s: at that rate p99 fell from 1.29 s to 102 ms and p50 from 314 ms to 4.6 ms, with no other change. 800 req/s is still over the knee, but with fewer dropped iterations. The slowest request measured **inside the handler** was 10.7 s during the 1,200 req/s run: requests were queueing for a pool connection while 25 transactions shared two cores with Postgres and the load generator. Pool exhaustion showed up as the symptom, exactly as predicted below. Because k6 shares the box, these are lower bounds.
+Two changes, each measured on its own. Reordering one statement so that the `gift_package` row lock spans only the update and the commit (see *Lock ordering*) moved the knee past 600 req/s: at that rate p99 fell from 1.29 s to 102 ms with no other change. 800 req/s was still over the knee. Adding a concurrency limit of 50 in-flight requests on `/draws` (see *Shed load instead of queueing it*) then turned the 800 req/s case from "everyone waits 4 s" into "89% are served with p99 of 211 ms and 11% get a 503 in microseconds". The served throughput settles at roughly the knee, which the limiter finds on its own: requests only pile up when the database slows down. The slowest request measured **inside the handler** was 10.7 s during the 1,200 req/s run: requests were queueing for a pool connection while 25 transactions shared two cores with Postgres and the load generator. Pool exhaustion showed up as the symptom, exactly as predicted below. Because k6 shares the box, these are lower bounds.
 
 With the load generator moved off the box (laptop over an SSH tunnel, which itself collapsed above ~400 req/s), the picture changed: at 400 req/s Postgres sat at 62% CPU and `pg_stat_activity` showed **10 backends waiting on `transactionid` and 3 on `tuple` locks**, with request latency spiking to 1.5 s while total CPU was still under 120% of 200%. That is the hot-row contention predicted below, surfacing before CPU runs out. At that point the lock on `gift_package` was held from the `UPDATE` through `INSERT draw_log` to the commit fsync. Inserting the log row before the hot update is what produced the "after" column above. The remaining lever is the commit itself: relaxing `synchronous_commit` would shorten the lock further, at the cost of losing the last few milliseconds of commits on a crash, which a prize with real value cannot accept.
 
