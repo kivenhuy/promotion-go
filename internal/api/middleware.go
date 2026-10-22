@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -18,14 +19,22 @@ func (r *statusRecorder) WriteHeader(code int) {
 func (h *Handler) logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
+		route := r.Pattern
+		if route == "" {
+			route = "unmatched" // 404, 405: mux không match gì
+		}
 		h.logger.Info("request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rec.status,
 			"duration_ms", float64(time.Since(start).Microseconds())/1000,
 		)
+		reqTotal.WithLabelValues(route, strconv.Itoa(rec.status)).Inc()
+		reqDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())
+
 	})
 }
 
@@ -56,9 +65,9 @@ func limitInflight(max int, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		default:
 			w.Header().Set("Retry-After", "1")
+			shedTotal.Inc()
 			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "busy, retry later"})
 
 		}
-
 	})
 }

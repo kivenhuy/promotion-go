@@ -17,6 +17,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -47,8 +48,10 @@ func main() {
 	if addr := os.Getenv("DEBUG_ADDR"); addr != "" {
 		go func() {
 			logger.Info("pprof listening", "addr", addr)
+			http.Handle("/metrics", promhttp.Handler())
 			if err := http.ListenAndServe(addr, nil); err != nil {
 				logger.Error("pprof server", "err", err)
+
 			}
 		}()
 	}
