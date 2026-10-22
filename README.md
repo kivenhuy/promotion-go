@@ -213,6 +213,28 @@ The second one is why the concurrency test distinguishes *expected* errors from 
 
 ---
 
+## Observability
+
+Both endpoints live on a separate debug port (`DEBUG_ADDR`, off unless set, bound to loopback in `compose.yml`), never on the public listener.
+
+**`/debug/pprof/`** is the standard Go profiler. A 30-second CPU profile under steady load is what showed that the application's own CPU goes to syscalls, not to JSON or logging.
+
+**`/metrics`** exposes three Prometheus series following the RED pattern:
+
+| metric | type | labels | answers |
+|---|---|---|---|
+| `http_requests_total` | counter | `route`, `status` | rate and error ratio |
+| `http_request_duration_seconds` | histogram | `route` | p50/p99 via `histogram_quantile` |
+| `http_requests_shed_total` | counter | | how often the inflight limiter refused |
+
+`route` is the matched mux pattern (`POST /draws`), not the raw path, so a future `/users/{id}` cannot explode label cardinality. The histogram buckets run from 1 ms to 5 s because that is the range the load tests showed this service actually occupies.
+
+A 60-second run at 400 req/s reconciled to the request: k6 reported 24,000 requests with 90 failures; `/metrics` reported 23,801 × 201, 109 × 409, 90 × 503 and `http_requests_shed_total 90`, with 81% of requests under 2.5 ms and all under 500 ms.
+
+```promql
+histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{route="POST /draws"}[1m])) by (le))
+```
+
 ## Running locally
 
 ```bash
